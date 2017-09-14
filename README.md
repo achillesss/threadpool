@@ -261,7 +261,7 @@ func Result(job Job, result interface{}) {
 - #### rust
 	线程在处理事务时，首先会收到一个枚举类型``Message``：
 	- ``NewJob(Job)``表示有任务需要处理
-	- ``Terminate``表示关闭该线程
+	- ``Terminate``表示该线程如果闲置的话，则停止接收任务
 
 	```rust
 	enum Message {
@@ -269,7 +269,7 @@ func Result(job Job, result interface{}) {
 		Terminate,
 	}
 	```
-	在收到``NewJob(Job)``时，直接使用``Job````Box``中的``FnBox``特性所有的``call_box()``方法来执行任务；而收到``Terminate``时，不再接收任何``Message``。看起来应该是这样：
+	在收到``NewJob(Job)``时，直接使用``Job`` ``Box``中的``FnBox``特性所有的``call_box()``方法来执行任务；而收到``Terminate``时，不再接收任何``Message``。看起来应该是这样：
 	
 	```rust
 	loop {
