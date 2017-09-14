@@ -1,9 +1,11 @@
 package pool
 
 import (
+	"bufio"
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -66,7 +68,7 @@ func testHelloWorld(t *testing.T) {
 }
 
 func testTCP(t *testing.T) {
-	addr := net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8107}
+	addr := net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}
 	l, err := net.ListenTCP("tcp", &addr)
 	if err != nil {
 		panic(err)
@@ -83,7 +85,7 @@ func testTCP(t *testing.T) {
 			panic(err)
 		}
 		job := newTCPJob(conn)
-		go threadPool.Execute(&job)
+		threadPool.Execute(&job)
 	}
 }
 
@@ -108,13 +110,29 @@ func (h *tcpHandler) Result() interface{} {
 }
 
 func handleRequest(conn *net.TCPConn) {
-	data, err := ioutil.ReadAll(conn)
+	request, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
-		panic(fmt.Errorf("Error reading: %s", err.Error()))
+		panic(err)
 	}
-	time.Sleep(time.Second * 5)
-	fmt.Printf("request: %s\n", data)
-	_, err = conn.Write([]byte("Message received."))
+
+	var filePath string
+	var head []byte
+	switch request.URL.Path {
+	case "/":
+		filePath = "../page/hello.html"
+		head = []byte("HTTP/1.1 200 OK\r\n\r\n")
+	default:
+		filePath = "../page/404.html"
+		head = []byte("HTTP/1.1 404 NOT FOUND\r\n\r\n")
+	}
+
+	// time.Sleep(time.Second * 5)
+	f, err := os.Open(filePath)
+	pageData, _ := ioutil.ReadAll(f)
+	head = append(head, pageData...)
+	conn.Write(head)
+	_, err = conn.ReadFrom(f)
+	fmt.Printf("write to connection\n")
 	if err != nil {
 		panic(err)
 	}
@@ -130,6 +148,6 @@ func shutdown(t *testing.T) {
 }
 func Test(t *testing.T) {
 	go shutdown(t)
-	testHelloWorld(t)
+	// testHelloWorld(t)
 	testTCP(t)
 }
