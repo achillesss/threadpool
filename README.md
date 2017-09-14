@@ -73,7 +73,7 @@
 	```
 - #### rust
 	- ``id``线程id
-	- ``job``待处理的事物，一个``Option````enum``，在``Option``中放置一个``Job``后，可以使用``Option``拥有的``take()``方法来获取一个``Job``的所有权，并将``Option``中的``Some()``变为``None``，实际上这是为了后面处理 graceful shutdown 所做的准备，否则这里直接放置一个``Job``类型就行了。``Option``中代码是这样的：
+	- ``job``待处理的事物，一个``Option`` ``enum``，在``Option``中放置一个``Job``后，可以使用``Option``拥有的``take()``方法来获取一个``Job``的所有权，并将``Option``中的``Some()``变为``None``，实际上这是为了后面处理 graceful shutdown 所做的准备，否则这里直接放置一个``Job``类型就行了。``Option``中代码是这样的：
 
 		```rust
 			match {
@@ -122,7 +122,7 @@
 		HandleResult()
 	}
 	```
-- #### rust ``Job````Box``。``Job``同时拥有``FnBox``和``Send``两种特性
+- #### rust ``Job`` ``Box``。``Job``同时拥有``FnBox``和``Send``两种特性
 
 	```rust
 	type Job = Box<FnBox + Send + 'static>;
@@ -165,14 +165,15 @@ func Result(job Job, result interface{}) {
 ### 事件处理逻辑
 
 - #### go
-线程池中的闲置线程数为当前线程池能并发处理事件的最大能力，线程池首先监控 ``workerQueue``，大体上应该是这样：
+
+	线程池中的闲置线程数为当前线程池能并发处理事件的最大能力，线程池首先监控 ``workerQueue``，大体上应该是这样：
 
 	```go
 	for w := range workerQueue {
 		// worker 'w' start to work
 	}
 	```
-接着，当线程池拿到一个闲置的 ``worker`` 时，此 ``worker`` 开始 ``working`` 的样子大概是这样：
+	接着，当线程池拿到一个闲置的 ``worker`` 时，此 ``worker`` 开始 ``working`` 的样子大概是这样：
 
 	```go
 	select {
@@ -186,13 +187,14 @@ func Result(job Job, result interface{}) {
 			workerQueue <- w
 	}
 	```
-当线程池关闭某个线程时，实际上只需要简单的将某个线程移出闲置线程``channel``就行了：
+	当线程池关闭某个线程时，实际上只需要简单的将某个线程移出闲置线程``channel``就行了：
 
 	```go
 	w := <- workerQueue
 	// w 被移出了
 	```
-综合起来，就出现了下面的代码：
+
+	综合起来，就出现了下面的代码：
 
 	- ``Treadpool`` 的 ``terminateWorkers`` 方法
 		
@@ -315,11 +317,12 @@ func Result(job Job, result interface{}) {
 				}
 				println!("Worker {} got a job; executing.", id);
 			});
+			
 			Worker {
 				id: id,
 				job: Some(t),
 			}
-    	}
+		}
 	}
 	```
 ### 线程池和线程的创建
@@ -465,10 +468,10 @@ func NewThreadPool(volume int) *ThreadPool {
 	}
 	```
 
-	当调用``drop()``时，首先发送和``worker``数量相同的``Terminate````Message``。闲置的``worker``总是先收到``Terminate``，并从``receive message loop``中``break``；繁忙的``worker``在处理完``Job``之后会继续进入``receive message loog``，也能接收到``Terminate``，从而保证所有的``worker``都能收到``Terminate``并停止接收任何``Job``。在所有的``worker``都处理完事物之后，通过``join()``来依次关闭所有已打开的线程。这样就实现了graceful shutdown。
+	当调用``drop()``时，首先发送和``worker``数量相同的``Terminate`` ``Message``。闲置的``worker``总是先收到``Terminate``，并从``receive message loop``中``break``；繁忙的``worker``在处理完``Job``之后会继续进入``receive message loop``，也能接收到``Terminate``，从而保证所有的``worker``都能收到``Terminate``并停止接收任何``Job``。在所有的``worker``都处理完事物之后，通过``join()``来依次关闭所有已打开的线程。这样就实现了graceful shutdown。
 ### 线程池处理事件
 
-- ####go
+- #### go
 
 
 	```go
@@ -485,7 +488,7 @@ func NewThreadPool(volume int) *ThreadPool {
 	}
 	```
 
-- ####rust
+- #### rust
 
 	```rust
 	pub fn execute<F>(&self, f: F)
@@ -501,12 +504,12 @@ func NewThreadPool(volume int) *ThreadPool {
 
 ### 总结
 
-实现线程池和GracefulShutdown的代码长度，两种语言都差不多长。go 的优势在于它的``interface{}``和``chan``+``gorutine``特别灵活，缺点在于对于类型的要求特别的确定，以及需要去处理错误和返回值。用go实现的多线程，差不多就像用一个办法简单的知道目前程序的闲置线程是否``>1``，如果是，直接对接收到的任务开一个``gorutine``去执行就完了.由于没有泛型，在传递``Job``的时候，需要显式的在一个特定的任务上实现所需求的各种方法。而rust的优势在于各种灵活的语言结构（``trait``,``enum``,``Box``,``Vec``等）以及拥有泛型，在GracefulShutdown上的处理也比用go处理起来更优雅，不用和go一样在``system.Interrupt``的时候还得亲自去捕捉一下并进行处理，只需要一个``Drop````trait``就能搞定，缺点在于为了让程序本身能够编译通过所需要理顺的语言逻辑，远比这几行代码所需要的业务逻辑多的多。
+实现线程池和GracefulShutdown的代码长度，两种语言都差不多长。go 的优势在于它的``interface{}``和``chan``+``gorutine``特别灵活，缺点在于对于类型的要求特别的确定，以及需要去处理错误和返回值。用go实现的多线程，差不多就像用一个办法简单的知道目前程序的闲置线程是否``>1``，如果是，直接对接收到的任务开一个``gorutine``去执行就完了.由于没有泛型，在传递``Job``的时候，需要显式的在一个特定的任务上实现所需求的各种方法。而rust的优势在于各种灵活的语言结构（``trait``,``enum``,``Box``,``Vec``等）以及拥有泛型，在GracefulShutdown上的处理也比用go处理起来更优雅，不用和go一样在``system.Interrupt``的时候还得亲自去捕捉一下并进行处理，只需要一个``Drop`` ``trait``就能搞定，缺点在于为了让程序本身能够编译通过所需要理顺的语言逻辑，远比这几行代码所需要的业务逻辑多的多。
 
 ### 例子
 至此，线程池的处理事件方法已写完。外部调用时，应该是这样：
 
-- ####go
+- #### go
 
 	```go
 	// 假设这是我们要执行的函数
@@ -575,7 +578,6 @@ func NewThreadPool(volume int) *ThreadPool {
 	}
 	
 	func main() {
-		// serve()
 		var threadPoolVolume = 10
 		threadPool := pool.NewThreadPool(threadPoolVolume)
 		defer threadPool.Close()
