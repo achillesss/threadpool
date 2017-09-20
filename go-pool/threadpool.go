@@ -53,19 +53,12 @@ func (t *ThreadPool) deliveryJobs() {
 	}
 }
 
-func (t *ThreadPool) newWorker(id int) {
-	w := new(worker)
-	w.id = id
-	t.workerQueue <- w
-	fmt.Printf("create worker %d\n", w.id)
-}
-
-func (t *ThreadPool) close() {
+func (t *ThreadPool) waitForInterruptSignal() {
 	signal.Notify(t.sysSignal, os.Interrupt)
 	for {
 		select {
 		case <-t.sysSignal:
-			t.Close()
+			t.close()
 			os.Exit(0)
 		}
 	}
@@ -85,16 +78,21 @@ func (t *ThreadPool) init(volume int) *ThreadPool {
 	return t
 }
 
+func newWorker(id int) *worker {
+	fmt.Printf("create worker %d\n", id)
+	w := new(worker)
+	w.id = id
+	return w
+}
+
 func (t *ThreadPool) createWorkers() *ThreadPool {
-	restWorker := t.volume
 	var group sync.WaitGroup
-	group.Add(restWorker)
-	for restWorker > 0 {
-		restWorker--
-		go func(restWorker int) {
-			t.newWorker(t.volume - restWorker)
+	for i := 0; i < t.volume; i++ {
+		group.Add(1)
+		go func(i int) {
+			t.workerQueue <- newWorker(i)
 			group.Done()
-		}(restWorker)
+		}(i)
 	}
 	group.Wait()
 	return t
@@ -115,13 +113,15 @@ func (t *ThreadPool) Execute(job Job) {
 	t.jobs <- job
 }
 
-func (t *ThreadPool) Close() {
+func (t *ThreadPool) close() {
 	fmt.Printf("start to close thread pool\n")
 	t.terminate <- struct{}{}
-	// if len(t.jobsDone) == 0 {
 	<-t.terminate
-	// }
 	fmt.Printf("close thread pool finished\n")
+}
+
+func (t *ThreadPool) Close() {
+	t.close()
 }
 
 func Result(job Job, result interface{}) {

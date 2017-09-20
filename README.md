@@ -151,7 +151,7 @@ func (t *ThreadPool) createWorkers() {
 当然也有用``gorutine``创建的方法，这样创建出来的 ``worker`` 是无序的：
 
 ```go
-func (t *ThreadPool) createWorkers *ThreadPool {
+func (t *ThreadPool) createWorkers() *ThreadPool {
 	var group sync.WaitGroup
 	for i := 0; i < t.volume; i++ {
 		group.Add(1)
