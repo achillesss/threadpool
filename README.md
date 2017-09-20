@@ -1,127 +1,438 @@
 ## Go 实现线程池以及GracefulShutdown<br>Rust 实现线程池以及GracefulShutdown<br>及两者对比
 
-### 线程池
+在并发处理任务时，往往需要对线程数量进行控制，同时需要在关闭程序之前能够处理完所有正在处理的任务，所以对于拥有GracefulShutdown功能的线程池的需求十分明显。下面分别介绍使用``go``和``rust``实现以上线程池的过程。
 
-- #### go
+大致的思路差不多是这样的：
 
-	``ThreadPool``结构中拥有以下元素：
-	- ``volume`` 记录线程数，用以后面关闭线程时对已关闭的线程进行核对
-	- ``workerQuue`` 用来放置闲置的线程，闲置的线程用来接收任务
-	- ``jobs`` 用以接收等待处理的事物
-	- ``jobsDone`` 用以接收已处理完的事物
- 	- ``terminate`` 用来接收线程池关闭的信号，一旦收到关闭信号，则将所有线程关闭
-	- ``sysSignal`` 用来接收终端 '^C' 信号，一旦接收到该信号，则先关闭线程池，之后再退出程序
+1. 我们需要一个外部的入口，来生成一个指定数量的线程池：
+```
+var threadPool = NewThreadPool(volume);
+```
+2. 同时需要另外一个方法能够将一个任意的任务丢到线程池中处理：
+```
+var job = newJob();
+threadPool.Execute(job);
+```
+3. 线程池自身能够实现``GracefulShutdown``，即在关闭程序之前能够处理完所有正在处理的任务
+4. 如果有需要，我们应该可以在任务处理完的同时，很方便的处理任务的返回值及错误
+
+### go 实现线程池
+
+首先，我们需要一个定制一个一定线程数量的线程池的函数：
+
+```go
+	func NewThreadPool(volume int) *ThreadPool {
+		threadPool := new(ThreadPool)
+
+		// threadPool 初始化
+
+		return threadPool
+	}
+```
+
+一个``ThreadPool``应该是这样的：
+1. 具有一个容量``volume``
+2. 拥有一个存放闲置线程的结构，从中获取闲置线程以执行任务，并在一个线程执行完任务之后，能很方便的将该线程放置回去等待其他任务
+3. 拥有一个接收任务的``channel``
+4. 拥有一个接信号的``channel``来关闭线程池
+5. 一个监测系统信号``Interrupt``的``channel``
+
+因此：
+```go
+type ThreadPool struct {
+	// 容量
+	volume      int 
+	// 闲置线程队列
+	workerQueue chan *worker
+	// 接收任务
+	jobs        chan Job
+	// 监测'Interrupt'信号
+	sysSignal   chan os.Signal
+	// 监测关闭线程池信号
+	terminate   chan struct{} 
+}
+```
+
+于是，创建新线程池的第一步就是给新的线程池分配一个内存：
+```go
+func newThreadPool() *ThreadPool {
+	return new(ThreadPool)
+}
+```
+
+之后便是对拿到的线程池进行初始化：
+```go
+func (t *ThreadPool) init(volume int) *ThreadPool {
+	t.volume = volume
+	t.workerQueue = make(chan *worker)
+	t.jobs = make(chan Job)
+	t.sysSignal = make(chan os.Signal)
+	t.terminate = make(chan struct{})
+	return t
+}
+```
+
+接下来要考虑的是单个线程的问题。``go``的并发执行任务非常简单，不需要我们去用某种方法获取到一个线程，然后在线程里面执行某个函数，之后再将这个线程关闭。我们只需要在一个函数前面加上``go ``，程序便会自动的新开一个``gorutine``来并发的执行这个函数，并且在函数执行完毕之后关闭该``gorutine``。所以，单个线程的结构并不复杂，只需要它自己记录一个自己的``id``就行了：
+
+```go
+type worker struct {
+	id int
+}
+```
+
+然后是需要被执行的任务``Job``。我们希望任何可执行的任务都能被线程池接收并执行，所以这个``Job``在``go``里面如果是一个``interface{}``的话，会是非常方便的。同时还要考虑到下面的一些点：
+1. 任务的类型变成了``interface{}``，如果要执行它，那么这个``interface{}``一定要有一个执行的方法``Do()``
+2. 任务有可能是有返回值和错误的，所以，最好在``Job``中保留获取返回值``Result``和获取错误``Error``的方法
+3. 有可能任务还需要在执行完毕之后顺带处理它的返回值或者结果，所以可以提供两个方法``HandleResult``和``HandleError``，在``Job.Do()``之后得到返回值或者错误之后使用
+4. 每个任务的返回值的类型有可能都不一样，所以，还需要一个函数来正确的拿到某个任务指定类型的返回值，而不是一个``interface{}``
+
+	首先，下面定义了一个``Job``接口：
 
 	```go
-	// 线程池，内部元素都不对外开放
-	type ThreadPool struct {
-		volume      int 
-		workerQueue chan *worker
-		jobs        chan *Job
-		jobsDone    chan *Job 
-		sysSignal   chan os.Signal
-		terminate   chan struct{} 
-	}
-	```
-- #### rust
-
-	``ThreadPool``结构中拥有以下元素：
-	- ``workers``一个向量，用来放置闲置的线程
-	- ``sender``用来发送待处理的事件
-
-	```rust
-	pub struct ThreadPool {
-		workers: Vec<Worker>,
-		sender: mpsc::Sender<Message>,
-	}
-	```
-	
-	```rust
-	impl ThreadPool {
-		pub fn new(size: usize) -> ThreadPool {
-			assert!(size > 0);
-			let (sender, receiver) = mpsc::channel();
-			let receiver = Arc::new(Mutex::new(receiver));
-			let mut workers = Vec::with_capacity(size);
-			for id in 0..size {
-				workers.push(Worker::new(id, receiver.clone()));
-			}
-			ThreadPool { workers, sender }
-    	}
-		
-		pub fn execute<F>(&self, f: F)
-   		where
-			F: FnOnce() + Send + 'static,
-		{
-			let job = Box::new(f);
-			self.sender.send(Message::NewJob(job)).unwrap();
-    	}
-	}
-	```
-
-
-### 线程
-
-- #### go
-	- ``id`` 线程id
-
-	```go
-	// 一个线程
-	type worker struct {
-		id int
-	}
-	```
-- #### rust
-	- ``id``线程id
-	- ``job``待处理的事物，一个``Option`` ``enum``，在``Option``中放置一个``Job``后，可以使用``Option``拥有的``take()``方法来获取一个``Job``的所有权，并将``Option``中的``Some()``变为``None``，实际上这是为了后面处理 graceful shutdown 所做的准备，否则这里直接放置一个``Job``类型就行了。``Option``中代码是这样的：
-
-		```rust
-			match {
-				Some(T) => {
-					let thread = T.take()
-					// ... do something with 'thread'
-				}
-				None => {
-				}
-			}
-		```
-
-	``Worker``结构：
-	
-	```rust
-	struct Worker {
-	    id: usize,
-	    job: Option<thread::JoinHandle<()>>,
-	}
-	```
-
-### 事件
-
-待处理的事件，需要外部实现其中的方法
-
-- #### go ``Job``,``ErrorHandler``,``ResultHandler`` 接口
-	- 线程会在处理一个事件时使用 ``Do()`` 方法
-	- 通过``Error() error``来返回事件可能会出现的错误
-	- 通过``Result()interface{}``返回事件可能的返回值
-	- 如果实现了``HandleError``，则在处理事件时遇到了错误，会自动调用
-	- 如果实现了``HandleResult``，则在处理事件之后会自动调用
-
-	```go
-	// Job to be done
-	type Job interface {
+	type Job interface{
 		Do()
 		Result() interface{}
 		Error() error
 	}
-	
-	type ErrorHandler interface {
-		HandleError()
-	}
-	
-	type ResultHandler interface {
-		HandleResult()
+	```
+
+	这样，在一个``Job``传递进来的时候，我们只需要去执行``Do()``的方法，要获取可能的错误，只需要使用``Error()``方法。而获取返回值，使用``Result()``方法的话，只能拿到一个``interface{}``类型的返回值，这并不是我们想要的，所以需要一个能够获取到具体类型返回值的函数：
+
+	```go
+	func Result(job Job, result interface{}) {
+		t := reflect.TypeOf(result)
+		if t.Kind() == reflect.Ptr {
+			reflect.ValueOf(result).Elem().Set(reflect.ValueOf(job.Result()))
+		}
 	}
 	```
+
+	上面这个函数的用途在于，只要将某个 ``Job`` 以及这个 **``Job``返回值类型的零值指针``result``** 放进去，就能够将返回值正确赋值给``result``，类似 *``json.Unmarshal(data []byte,v interface{})``* 的用法。
+
+	当外部某个具体的结构实现了上面 ``Job`` 接口的三个方法时，它的实例就能够被当做一个 ``Job`` 传递到线程池中。当一个 ``Job`` 执行完毕之后，接下来我们 *可能需要* 去处理一下执行完毕之后得到的返回值和错误，于是，下面又提供了另外两个接口：
+
+	```go
+	type ResultHandler interface{
+		HandleResult()
+	}
+
+	type ErrorHandler interface{
+		HandleError()
+	}
+	```
+
+	用法大概会是这样的：如果我们想在程序执行完毕之后来处理返回值，那么我们就给刚刚实现了 ``Job`` 接口功能的结构，再实现上面 ``ResultHandler`` 接口的功能；如果是想处理错误，那么就实现 ``ErrorHandler`` 的功能；两个都实现的话，说明想同时处理错误和返回值。
+
+现在，整个 ``ThreadPool`` 的结构已经明了了，于是我们有了一个重构之后的 ``NewThreadPool`` 函数：
+
+```go
+func NewThreadPool(volume int) *ThreadPool {
+	return newThreadPool().init(volume)
+}
+```
+
+因为刚刚上面对 ``worker`` 和 ``Job`` 已经定义完成，接下来应该处理这两个结构相关的问题。
+
+在定义完了 ``worker`` 之后，我们知道 ``worker`` 其实只需要一个 ``id`` 来标识身份就够了；同时 ``ThreadPool`` 需要在 ``workerQueue`` 中取到闲置线程。所以，一个创建 ``worker`` 的方法就出现了：
+
+```go
+func newWorker(id int) *worker {
+	w := new(worker)
+	w.id = id
+	return w
+}
+func (t *ThreadPool) createWorkers() {
+	for i := 0; i < t.volume; i++ {
+		t.workerQueue <- newWorker(i)
+	}
+}
+```
+
+当然也有用``gorutine``创建的方法，这样创建出来的 ``worker`` 是无序的：
+
+```go
+func (t *ThreadPool) createWorkers *ThreadPool {
+	var group sync.WaitGroup
+	for i := 0; i < t.volume; i++ {
+		group.Add(1)
+		go func(i int) {
+			t.workerQueue <- newWorker(i)
+			group.Done()
+		}(i)
+	}
+	group.Wait()
+	return t
+}
+```
+
+于是 ``NewThreadPool`` 方法更新成了：
+
+```go
+func NewThreadPool(volume int) *ThreadPool {
+	return newThreadPool().init(volume).createWorkers()
+}
+```
+
+当一个线程池里面所有线程都创建好了之后，接着便需要考虑如何处理线程池中收到的任务。目前有两种方法：
+1. 一直监听 ``ThreadPool.jobs`` ，取到 ``Job`` 之后，立即从线程池中获取一个闲置线程来处理该任务；当终止线程池时，首先停止对 ``ThreadPool.jobs`` 的监听。
+2. 一直从闲置线程队列 ``ThreadPool.workerQueue`` 中获取一个闲置的线程，取到一个闲置的线程之后，在这个线程上去监听 ``ThreadPool.jobs`` 和 ``ThreadPool.terminate`` ，如果有 ``Job`` 则处理 ``Job`` ，如果是 ``terminate`` 则终止
+
+下面使用第2种逻辑来处理任务。首先是获取闲置的线程：
+
+```go
+func (t *ThreadPool) deliveryJobs() {
+	for w := range t.workerQueue {
+		// do something
+	}
+}
+```
+
+然后在一个线程上来处理任务或者终止信号：
+
+```go
+func (w *worker) work(t *ThreadPool) {
+	select {
+		case <- t.terminate:
+
+		case job := <- t.jobs:
+
+	}
+}
+```
+
+更新 ``deliveryJobs()`` :
+
+```go
+func (t *ThreadPool) deliveryJobs() {
+	for w := range t.workerQueue {
+		w.work(t)
+	}
+}
+```
+
+于是 ``NewThreadPool(int)`` 函数继续被更新：
+
+```go
+func NewThreadPool(volume int) *ThreadPool {
+	t := newThreadPool().init(volume).createWorkers()
+	go t.deliveryJobs()
+	return t
+}
+```
+
+接下来是处理 ``(*worker) work()`` 方法。首先是 ``select`` 中的 ``<- terminate`` ``case``，此时我们得到要关闭整个线程池的信号，所以首先我们得将已经拿到的闲置线程重新放回队列，不让此线程去处理任何任务；然后将闲置线程中的所有线程从队列中一一取出，并不再放进去，直到取出 ``ThreadPool.volume`` 个线程，才说明没有任何闲置线程可用，并且也没有任何线程正在处理任务，此时线程池也就完全关闭了，程序可以安全退出；对于正在处理任务的线程，此时不必去考虑。
+
+所以，我们先得有一个取出线程的方法：
+
+```go
+	func (t *ThreadPool) terminateWorkers() {
+		for i := 0; i < t.volume; i++ {
+			<- t.workerQueue
+		}
+	}
+```
+
+然后将这个方法加以运用：
+```go
+...
+case <- terminate:
+	t.workerQueue <- w
+	t.terminateWorkers()
+...
+```
+
+最后，我们希望外界有办法知道我们何时成功的关闭了所有的线程，所以，在内部成功关闭了所有线程之后，我们对 ``ThreadPool.terminate`` 从内部传递一个信号，用以外部接收：
+
+```go
+...
+case <- t.terminate:
+	t.workerQueue <- w
+	t.terminateWorkers()
+	t.terminate <- struct{}{}
+...
+```
+
+更新代码：
+
+```go
+func (w *worker) work(t *ThreadPool) {
+	select {
+		case <- t.terminate:
+			t.workerQueue <- w
+			t.terminateWorkers()
+			t.terminate <- struct{}{}
+		case job := <- t.jobs:
+			...
+	}
+}
+```
+
+接着是任务处理部分。当一个线程监听到的信号不是 ``terminate`` 而是 ``Job``，那么此时直接调用前面所说的方法来执行就好；同时，我们还要尝试调用处理返回值和错误的方法来对可能出现的返回值和错误进行处理；最后，任务完成，我们将线程重新放回闲置线程队列中，这样，如果是线程池正在关闭，那么它一定能在这个线程完成任务之后，在 ``workerQueue`` 中找到它，如果是持续运行的线程池，在一段时间之后，这个线程又会被捕获到，并重新给它分配新的任务：
+
+```go
+...
+case job := <- t.jobs:
+	job.Do()
+	if v, ok := job.(ErrorHandler); ok {
+		v.HandleError()
+	}
+	if v, ok := job.(ResultHandler); ok {
+		v.HandleResult()
+	}
+	t.workerQueue <- w
+...
+```
+
+更新 ``(*worker) work(*Terminate)``：
+
+```go
+func (w *worker) work(t *ThreadPool) {
+	select {
+		case <- t.terminate:
+			t.workerQueue <- w
+			t.terminateWorkers()
+			t.terminate <- struct{}{}
+		case job := <- t.jobs:
+			job.Do()
+			if v, ok := job.(ErrorHandler); ok {
+				v.HandleError()
+			}
+			if v, ok := job.(ResultHandler); ok {
+				v.HandleResult()
+			}
+			t.workerQueue <- w
+	}
+}
+```
+
+关于线程池对线程及任务的处理逻辑就已经全部完成，接下来是线程池的关闭还剩下的一点点事情：线程池关闭的信号的来源。我们应该有一个内部的方法来给线程池传递关闭信号，并且能知道线程池已经完全关闭：
+
+```go
+func (t *ThreadPool) close() {
+	t.terminate <- struct{}{}
+	<- t.terminate
+}
+```
+
+同时外部也需要这个方法来对线程池进行关闭，包装一下就好：
+
+```go
+func (t *ThreadPool) Close {
+	t.close()
+}
+```
+
+同时我们应该需要在 ``NewThreadPool`` 的时候就能监测系统的关闭信号``Interrupt``：
+
+```go
+func (t *ThreadPool) waitForInterruptSignal() {
+	signal.Notify(t.sysSignal, os.Interrupt)
+	for {
+		select {
+		case <-t.sysSignal:
+			t.close()
+			os.Exit(0)
+		}
+	}
+}
+```
+
+更新 ``NewThreadPool(int)`` :
+
+```go
+func NewThreadPool(volume int) *ThreadPool {
+	t := newThreadPool().init(volume).createWorkers()
+	go t.deliveryJobs()
+	go t.waitForInterruptSignal()
+	return t
+}
+```
+
+至此，线程池对于线程、任务以及自身的关闭部分就已经全部处理完毕了。现在只剩下最后一件事情：任务的接收。
+
+一个任务只需要在实现了 ``Job`` 的全部方法之后，就可以被传递到 ``ThreadPool`` 的任务接收 ``chan`` 中：
+
+```go
+func (t *ThreadPool) Execute(job *Job) {
+	t.jobs <- job
+}
+```
+
+最后，外部调用的情况应该是这样：
+
+```go
+type expectedJob struct {
+	...
+}
+
+func (e *expectedJob) Do() { ... }
+func (e *expectedJob) Result() { ... }
+func (e *expectedJob) Error() { ... }
+
+func (e *expectedJob) HandleResult() { ... }
+func (e *expectedJob) HandleError() { ... }
+
+func newJob(conditions ...interface{}) Job {
+	return &expectedJob{ ... }
+}
+
+func main() {
+	threadPoolVolume := 10
+	threadPool := NewThreadPool(threadPoolVolume)
+	defer threadPool.Close()
+	
+	for ... {
+		job := newJob( ... )
+		threadPool.Execute(job)
+	}
+}
+```
+
+---
+
+### rust 实现线程池
+
+### 线程池
+
+``ThreadPool``结构中拥有以下元素：
+- ``workers``一个向量，用来放置闲置的线程
+- ``sender``用来发送待处理的事件
+
+```rust
+pub struct ThreadPool {
+	workers: Vec<Worker>,
+	sender: mpsc::Sender<Message>,
+}
+```
+
+### 线程
+
+- ``id``线程id
+- ``job``待处理的事物，一个``Option`` ``enum``，在``Option``中放置一个``Job``后，可以使用``Option``拥有的``take()``方法来获取一个``Job``的所有权，并将``Option``中的``Some()``变为``None``，实际上这是为了后面处理 graceful shutdown 所做的准备，否则这里直接放置一个``Job``类型就行了。``Option``中代码是这样的：
+
+	```rust
+		match {
+			Some(T) => {
+				let thread = T.take()
+				// ... do something with 'thread'
+			}
+			None => {
+			}
+		}
+	```
+
+``Worker``结构：
+
+```rust
+struct Worker {
+		id: usize,
+		job: Option<thread::JoinHandle<()>>,
+}
+```
+
+### 事件
+
+待处理的事件，需要外部实现其中的方法
 - #### rust ``Job`` ``Box``。``Job``同时拥有``FnBox``和``Send``两种特性
 
 	```rust
@@ -147,359 +458,140 @@
 	
 	- ``Send``特性用来发送
 
-
-	
-
-### go 事件返回值
-传入一个事件和一个接收返回值的参数 ``result``，将事件的返回值赋值给 ``result``
-
-```go
-func Result(job Job, result interface{}) {
-	t := reflect.TypeOf(result)
-	if t.Kind() == reflect.Ptr {
-		reflect.ValueOf(result).Elem().Set(reflect.ValueOf(job.Result()))
-	}
-}
-```
-
 ### 事件处理逻辑
 
-- #### go
+线程在处理事务时，首先会收到一个枚举类型``Message``：
+- ``NewJob(Job)``表示有任务需要处理
+- ``Terminate``表示该线程如果闲置的话，则停止接收任务
 
-	线程池中的闲置线程数为当前线程池能并发处理事件的最大能力，线程池首先监控 ``workerQueue``，大体上应该是这样：
-
-	```go
-	for w := range workerQueue {
-		// worker 'w' start to work
-	}
-	```
-	接着，当线程池拿到一个闲置的 ``worker`` 时，此 ``worker`` 开始 ``working`` 的样子大概是这样：
-
-	```go
-	select {
-		case <- terminate:
-			workerQueue <- w
-			// terminate TreadPool
-		case job <- jobChan:
-			// got a job and start to do it
-			go job.Do()
-			// after job is done
-			workerQueue <- w
-	}
-	```
-	当线程池关闭某个线程时，实际上只需要简单的将某个线程移出闲置线程``channel``就行了：
-
-	```go
-	w := <- workerQueue
-	// w 被移出了
-	```
-
-	综合起来，就出现了下面的代码：
-
-	- ``Treadpool`` 的 ``terminateWorkers`` 方法
-		
-		```go
-		// 移出所有的闲置线程，直到数量为线程池的 volume 时，才结束
-		func (t *ThreadPool) terminateWorkers() {
-			for i := 0; i < t.volume; i++ {
-				// fmt.Printf("%d workers remains to be terminated\n", t.volume-i)
-				w := <-t.workerQueue
-				// fmt.Printf("terminate worker %d\n", w.id)
-			}
-			// fmt.Printf("terminate finished.\n")
-		}
-		```
-
-	- ``worker`` 的 ``work`` 方法
-	
-		``work`` 方法实现了 graceful shutdown 的逻辑：关闭线程时，首先关闭所有闲置的线程，确保不再接收新的任务；其次，正在执行任务的线程在任务执行完毕之后被放回闲置线程队列中，然后被关闭
-	
-		```go
-		func (w *worker) work(t *ThreadPool) {
-			select {
-			case <-t.terminate:
-				// 如果是在获取了一个 worker 的情况下拿到了终止信号
-				// 则将获取到的 worker 塞到闲置线程队列中，并直接调用终止线程池的方法
-				t.workerQueue <- w
-				t.terminateWorkers()
-				// 传回终止信号是为了让外界知道此时线程池已经关闭
-				t.terminate <- struct{}{}
-			case job := <-t.jobs:
-				// fmt.Printf("worker %d get a job\n", w.id)
-				go func(t *ThreadPool, w *worker) {
-					(*job).Do()
-					if (*job).Error() != nil {
-						// fmt.Printf("job got an error: %v\n", (*job).Error())
-						if v, ok := (*job).(ErrorHandler); ok {
-							// fmt.Printf("handle error\n")
-							v.HandleError()
-						}
-					}
-					if v, ok := (*job).(ResultHandler); ok {
-						// fmt.Printf("handle result\n")
-						v.HandleResult()
-					}
-					t.jobsDone <- job
-					// fmt.Printf("worker %d has finished the job\n", w.id)
-					t.workerQueue <- w
-					// fmt.Printf("worker %d is waiting for a job\n", w.id)
-				}(t, w)
-			}
-		}
-		```
-
-	- ``TreadPool`` 的 ``deliveryJobs`` 方法
-	 
-		```go
-		func (t *ThreadPool) deliveryJobs() {
-			// fmt.Printf("start to delivery jobs\n")
-			for w := range t.workerQueue {
-				w.work(t)
-			}
-		}
-		```
-- #### rust
-	线程在处理事务时，首先会收到一个枚举类型``Message``：
-	- ``NewJob(Job)``表示有任务需要处理
-	- ``Terminate``表示该线程如果闲置的话，则停止接收任务
-
-	```rust
-	enum Message {
-		NewJob(Job),
-		Terminate,
-	}
-	```
-	在收到``NewJob(Job)``时，直接使用``Job`` ``Box``中的``FnBox``特性所有的``call_box()``方法来执行任务；而收到``Terminate``时，不再接收任何``Message``。看起来应该是这样：
-	
-	```rust
-	loop {
-		method to receive a message
-		let message = ...;
-	
-		match message {
-			NewJob(job) => {
-				job.call_box();
-			}
-			Terminate => {
-				break;
-			}
-		}
-	}
-	```
-
-	而``Message``通过包``mpsc``中的``channel()``方法返回的``sender``和``receiver``来发送和接收，同时，由于是一个线程发送任务，多个线程接收任务并处理，同时多个线程使用的是同一个``receiver``来接收任务。为了避免多个线程同时取到一个相同的任务去执行，需要在``receiver``上需要加锁来保证每次只有一个线程使用``receiver``来获取一个任务去执行：
-	
-	```rust
-	let (sender, receiver) = mpsc::channel();
-	
-	let receiver = Arc::new(Mutex::new(receiver));
-	
-	let message = receiver.lock().unwrap().recv().unwrap();
-	```
-	
-	最终，在``Worker``上实现如下的方法来让一个线程执行任务或者关闭：
-	
-	```rust
-	impl Worker {
-		pub fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) -> Worker {
-			let t = thread::spawn(move || loop {
-				let message = receiver.lock().unwrap().recv().unwrap();
-
-				match message {
-					Message::NewJob(job) => {
-						println!("Worker {} got a job; executing.", id);
-						job.call_box();
-					}
-					Message::Terminate => {
-						println!("Worker {} was told to terminate.", id);
-						break;
-					}
-				}
-				println!("Worker {} got a job; executing.", id);
-			});
-			
-			Worker {
-				id: id,
-				job: Some(t),
-			}
-		}
-	}
-	```
-### 线程池和线程的创建
-
-- #### go
-	- 新建线程池
-
-		```go
-		func newThreadPool() *ThreadPool {
-			return new(ThreadPool)
-		}
-		```
-
-	- 初始化线程池
-
-		```go
-		func (t *ThreadPool) init(volume int) *ThreadPool {
-			t.jobs = make(chan Job)
-			t.terminate = make(chan struct{})
-			t.sysSignal = make(chan os.Signal)
-			t.workerQueue = make(chan *worker, volume)
-			t.volume = volume
-		
-			return t
-		}
-		```
-
-	- 创建一个线程
-
-		```go
-		func (t *ThreadPool) newWorker(id int) {
-			w := new(worker)
-			w.id = id
-			t.workerQueue <- w
-			fmt.Printf("create worker %d\n", w.id)
-		}
-		```
-
-	- 使用``gorutine``创建所有线程
-	
-		```go
-		func (t *ThreadPool) createWorkers() *ThreadPool {
-			restWorker := t.volume
-			var group sync.WaitGroup
-			group.Add(restWorker)
-			for restWorker > 0 {
-				restWorker--
-				go func(restWorker int) {
-					t.newWorker(t.volume - restWorker)
-					group.Done()
-				}(restWorker)
-			}
-			group.Wait()
-			return t
-		}
-		
-		```
-
-- #### rust
-
-	在``TreadPool``上实现了两个方法：
-	
-	```rust
-	impl ThreadPool {
-		pub fn new(size: usize) -> ThreadPool {
-			assert!(size > 0);
-	
-			let (sender, receiver) = mpsc::channel();
-		
-			let receiver = Arc::new(Mutex::new(receiver));
-		
-			let mut workers = Vec::with_capacity(size);
-	
-			for id in 0..size {
-				workers.push(Worker::new(id, receiver.clone()));
-			}
-	
-			ThreadPool { workers, sender }
-		}
-	}
-	```
-	- ``new(unsize)``方法返回一个线程池，一个线程池中拥有``unsize``个``worker``和一个``sender``
-
-### go 外部创建线程池方法
-
-```go
-func NewThreadPool(volume int) *ThreadPool {
-	if volume <= 0 {
-		panic("invalid go rutine number")
-	}
-	t := newThreadPool().init(volume).createWorkers()
-	go t.deliveryJobs()
-	go t.close()
-	return t
+```rust
+enum Message {
+	NewJob(Job),
+	Terminate,
 }
 ```
+在收到``NewJob(Job)``时，直接使用``Job`` ``Box``中的``FnBox``特性所有的``call_box()``方法来执行任务；而收到``Terminate``时，不再接收任何``Message``。看起来应该是这样：
+
+```rust
+loop {
+	method to receive a message
+	let message = ...;
+
+	match message {
+		NewJob(job) => {
+			job.call_box();
+		}
+		Terminate => {
+			break;
+		}
+	}
+}
+```
+
+而``Message``通过包``mpsc``中的``channel()``方法返回的``sender``和``receiver``来发送和接收，同时，由于是一个线程发送任务，多个线程接收任务并处理，同时多个线程使用的是同一个``receiver``来接收任务。为了避免多个线程同时取到一个相同的任务去执行，需要在``receiver``上需要加锁来保证每次只有一个线程使用``receiver``来获取一个任务去执行：
+
+```rust
+let (sender, receiver) = mpsc::channel();
+
+let receiver = Arc::new(Mutex::new(receiver));
+
+let message = receiver.lock().unwrap().recv().unwrap();
+```
+
+最终，在``Worker``上实现如下的方法来让一个线程执行任务或者关闭：
+
+```rust
+impl Worker {
+	pub fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) -> Worker {
+		let t = thread::spawn(move || loop {
+			let message = receiver.lock().unwrap().recv().unwrap();
+
+			match message {
+				Message::NewJob(job) => {
+					println!("Worker {} got a job; executing.", id);
+					job.call_box();
+				}
+				Message::Terminate => {
+					println!("Worker {} was told to terminate.", id);
+					break;
+				}
+			}
+			println!("Worker {} got a job; executing.", id);
+		});
+		
+		Worker {
+			id: id,
+			job: Some(t),
+		}
+	}
+}
+```
+### 线程池和线程的创建
+
+在``TreadPool``上实现了两个方法：
+
+```rust
+impl ThreadPool {
+	pub fn new(size: usize) -> ThreadPool {
+		assert!(size > 0);
+
+		let (sender, receiver) = mpsc::channel();
+	
+		let receiver = Arc::new(Mutex::new(receiver));
+	
+		let mut workers = Vec::with_capacity(size);
+
+		for id in 0..size {
+			workers.push(Worker::new(id, receiver.clone()));
+		}
+
+		ThreadPool { workers, sender }
+	}
+}
+```
+
+- ``new(unsize)``方法返回一个线程池，一个线程池中拥有``unsize``个``worker``和一个``sender``
 
 ### 关闭线程池
 
-- #### go
+如果一个值拥有``Drop``特性，rust会在一个变量要离开其作用域时，调用该特性中的``drop()``方法。如果程序即将关闭，为了实现 graceful shutdown，就要保证最后离开作用域的应该是``TreadPool``本身，所以，在``TreadPool``上实现``Drop``特性
 
-	线程有两种关闭的方法，一种是程序内正常关闭，此时向 ``TreadPool`` 中的 ``terminate`` 发送一个终止信号，在得到 ``terminate`` 中的信号返回时，确认线程池成功关闭；另外一种是捕获命令行的 ``^C`` 指令，此时调用关闭线程池的方法，在确认线程池关闭之后使用``Os.Exit(0)`` 来关闭程序
-
-	```go
-	func (t *ThreadPool) Close() {
-		t.terminate <- struct{}{}
-		<-t.terminate
-	}
+```rust
+impl Drop for ThreadPool {
+	fn drop(&mut self) {
+			println!("Sending terminate message to all workers");
 	
-	func (t *ThreadPool) close() {
-		signal.Notify(t.sysSignal, os.Interrupt)
-		for {
-			select {
-			case <-t.sysSignal:
-				t.Close()
-				os.Exit(0)
+			for _ in &mut self.workers {
+					self.sender.send(Message::Terminate).unwrap();
 			}
-		}
-	}
-	```
-- #### rust
-
-	如果一个值拥有``Drop``特性，rust会在一个变量要离开其作用域时，调用该特性中的``drop()``方法。如果程序即将关闭，为了实现 graceful shutdown，就要保证最后离开作用域的应该是``TreadPool``本身，所以，在``TreadPool``上实现``Drop``特性
+			println!("Shutting down all workers");
 	
-	```rust
-	impl Drop for ThreadPool {
-		fn drop(&mut self) {
-		    println!("Sending terminate message to all workers");
-		
-		    for _ in &mut self.workers {
-		        self.sender.send(Message::Terminate).unwrap();
-		    }
-		    println!("Shutting down all workers");
-		
-		    for worker in &mut self.workers {
-		        println!("Shutting down worker {}", worker.id);
-		
-		        if let Some(thread) = worker.job.take() {
-		            thread.join().unwrap();
-		        }
-		    }
-		}
+			for worker in &mut self.workers {
+					println!("Shutting down worker {}", worker.id);
+	
+					if let Some(thread) = worker.job.take() {
+							thread.join().unwrap();
+					}
+			}
 	}
-	```
+}
+```
 
-	当调用``drop()``时，首先发送和``worker``数量相同的``Terminate`` ``Message``。闲置的``worker``总是先收到``Terminate``，并从``receive message loop``中``break``；繁忙的``worker``在处理完``Job``之后会继续进入``receive message loop``，也能接收到``Terminate``，从而保证所有的``worker``都能收到``Terminate``并停止接收任何``Job``。在所有的``worker``都处理完事物之后，通过``join()``来依次关闭所有已打开的线程。这样就实现了graceful shutdown。
+当调用``drop()``时，首先发送和``worker``数量相同的``Terminate`` ``Message``。闲置的``worker``总是先收到``Terminate``，并从``receive message loop``中``break``；繁忙的``worker``在处理完``Job``之后会继续进入``receive message loop``，也能接收到``Terminate``，从而保证所有的``worker``都能收到``Terminate``并停止接收任何``Job``。在所有的``worker``都处理完事物之后，通过``join()``来依次关闭所有已打开的线程。这样就实现了graceful shutdown。
+
 ### 线程池处理事件
 
-- #### go
+```rust
+pub fn execute<F>(&self, f: F)
+	where
+		F: FnOnce() + Send + 'static,
+{
+	let job = Box::new(f);
+	self.sender.send(Message::NewJob(job)).unwrap();
+}
+```
 
-
-	```go
-	func (t *ThreadPool) Execute(j Job) {
-		t.jobs <- j
-		for job := range t.jobsDone {
-			if job == j {
-				break
-			} else {
-				t.jobsDone <- job
-			}
-		}
-		// fmt.Printf("got a job\n")
-	}
-	```
-
-- #### rust
-
-	```rust
-	pub fn execute<F>(&self, f: F)
-		where
-			F: FnOnce() + Send + 'static,
-	{
-		let job = Box::new(f);
-		self.sender.send(Message::NewJob(job)).unwrap();
-	}
-	```
-	- ``execute(F<FnOnce() + Send + 'static>)``方法发布一个具体的``Job``，前面的``Job``类型是``Box<FnBox + Send + 'static>``，而``FnBox``实际上是在``FnOnce()``特性上实现的另外一个特性，所以``FnBox``本身也具有``FnOnce()``特性，因此这里直接可以``execute(Job)``，新的``Job``被``sender``的``send``方法发送出去，由``worker``中的``receiver``来接收。
+- ``execute(F<FnOnce() + Send + 'static>)``方法发布一个具体的``Job``，前面的``Job``类型是``Box<FnBox + Send + 'static>``，而``FnBox``实际上是在``FnOnce()``特性上实现的另外一个特性，所以``FnBox``本身也具有``FnOnce()``特性，因此这里直接可以``execute(Job)``，新的``Job``被``sender``的``send``方法发送出去，由``worker``中的``receiver``来接收。
 
 
 ### 总结
@@ -581,7 +673,8 @@ func NewThreadPool(volume int) *ThreadPool {
 		var threadPoolVolume = 10
 		threadPool := pool.NewThreadPool(threadPoolVolume)
 		defer threadPool.Close()
-	
+		
+
 		job := newJob("one", "two", "three")
 		threadPool.Execute(&job)
 		fmt.Printf("job \"one, two, three\" finished!\n")

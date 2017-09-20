@@ -27,19 +27,18 @@ func (w *worker) work(t *ThreadPool) {
 	case job := <-t.jobs:
 		fmt.Printf("worker %d get a job: %v\n", w.id, job)
 		go func(t *ThreadPool, w *worker) {
-			(*job).Do()
-			if (*job).Error() != nil {
-				fmt.Printf("job got an error: %v\n", (*job).Error())
-				if v, ok := (*job).(ErrorHandler); ok {
+			job.Do()
+			if job.Error() != nil {
+				fmt.Printf("job got an error: %v\n", job.Error())
+				if v, ok := job.(ErrorHandler); ok {
 					fmt.Printf("handle error\n")
 					v.HandleError()
 				}
 			}
-			if v, ok := (*job).(ResultHandler); ok {
+			if v, ok := job.(ResultHandler); ok {
 				fmt.Printf("handle result\n")
 				v.HandleResult()
 			}
-			t.jobsDone <- job
 			fmt.Printf("worker %d has finished the job\n", w.id)
 			t.workerQueue <- w
 			fmt.Printf("worker %d is waiting for a job\n", w.id)
@@ -77,11 +76,10 @@ func newThreadPool() *ThreadPool {
 }
 
 func (t *ThreadPool) init(volume int) *ThreadPool {
-	t.jobs = make(chan *Job)
+	t.jobs = make(chan Job)
 	t.terminate = make(chan struct{})
 	t.sysSignal = make(chan os.Signal)
 	t.workerQueue = make(chan *worker, volume)
-	t.jobsDone = make(chan *Job)
 	t.volume = volume
 
 	return t
@@ -112,25 +110,17 @@ func NewThreadPool(volume int) *ThreadPool {
 	return t
 }
 
-func (t *ThreadPool) Execute(j *Job) {
-	fmt.Printf("got a job: %v\n", j)
-	t.jobs <- j
-	for job := range t.jobsDone {
-		if job == j {
-			fmt.Printf("got job %v done\n", job)
-			break
-		} else {
-			t.jobsDone <- job
-		}
-	}
+func (t *ThreadPool) Execute(job Job) {
+	fmt.Printf("got a job: %v\n", job)
+	t.jobs <- job
 }
 
 func (t *ThreadPool) Close() {
 	fmt.Printf("start to close thread pool\n")
 	t.terminate <- struct{}{}
-	if len(t.jobsDone) == 0 {
-		<-t.terminate
-	}
+	// if len(t.jobsDone) == 0 {
+	<-t.terminate
+	// }
 	fmt.Printf("close thread pool finished\n")
 }
 

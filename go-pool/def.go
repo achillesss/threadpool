@@ -8,8 +8,7 @@ type ThreadPool struct {
 	sysSignal   chan os.Signal // 捕获 Ctrl+C
 	workerQueue chan *worker   // 闲置资源
 	volume      int            // 线程数
-	jobs        chan *Job      // 等待处理的事件集；没有缓冲
-	jobsDone    chan *Job
+	jobs        chan Job       // 等待处理的事件集；没有缓冲
 }
 
 type worker struct {

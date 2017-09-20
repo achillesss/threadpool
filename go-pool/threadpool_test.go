@@ -45,7 +45,7 @@ func (h *handler) HandleResult() {
 
 func HelloWorld(args ...interface{}) (string, error) {
 	for i, arg := range args {
-		time.Sleep(time.Second * 1)
+		time.Sleep(time.Millisecond * 300)
 		fmt.Printf("now, got arg %d: %+v\n", i, arg)
 	}
 	return fmt.Sprintf("%v", args[0]), fmt.Errorf("HelloWorld has no error")
@@ -62,9 +62,13 @@ func testHelloWorld(t *testing.T) {
 	threadPool := NewThreadPool(threadPoolVolume)
 	defer threadPool.Close()
 
-	job := newJob("one", "two", "three")
-	threadPool.Execute(&job)
-	fmt.Printf("job \"one, two, three\" finished!\n")
+	jobsCount := 10
+
+	for i := 0; i < jobsCount; i++ {
+		job := newJob("one", "two", "three")
+		threadPool.Execute(job)
+		fmt.Printf("job %d \"one, two, three\" finished!\n", i)
+	}
 }
 
 func testTCP(t *testing.T) {
@@ -147,7 +151,7 @@ func shutdown(t *testing.T) {
 	os.Exit(0)
 }
 func Test(t *testing.T) {
-	go shutdown(t)
-	// testHelloWorld(t)
-	testTCP(t)
+	// go shutdown(t)
+	testHelloWorld(t)
+	// testTCP(t)
 }
